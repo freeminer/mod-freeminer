@@ -1,0 +1,25 @@
+# Obsidian searches below; obsidian blocks search above.
+# Standing frames multiply by opening height; flat frames by opening area.
+portals_y_offset (Vertical distance per opening height or area node) int 10000 1
+# Standing frames multiply by opening width.
+# Portal facing selects X or Z; coordinates select a deterministic sign.
+portals_xz_offset (Horizontal distance per opening width node) int 10000 0
+portals_y_radius (Vertical search radius) int 500 2
+# Defaults search within ±500 nodes on all axes around the target.
+# Search bounds follow the engine's mapgen edges.
+portals_search_radius (Horizontal search radius) int 500 16 1024
+# Maximum total search time, including waiting for emerge callbacks.
+portals_search_timeout (Portal search timeout in seconds) int 60 10 3600
+
+# Move liquids touching either face to the opposite portal face, one node lower.
+portals_transfer_liquids (Transfer liquids through portals) bool true
+
+# Maximum outer width or height; includes the frame border.
+portals_max_frame_size (Maximum portal frame side length) int 64 3 1024
+
+# Allow destination volumes and exits in liquids.
+# Safe destination mode restricts liquid types and requires solid footing.
+portals_spawn_in_liquids (Allow destinations in liquids) bool true
+
+# Reject damaging or solid liquids and damaging footing; require solid ground.
+portals_safe_destination (Require safe portal destinations) bool false

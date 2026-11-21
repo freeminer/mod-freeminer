@@ -1,0 +1,128 @@
+
+dofile(core.get_modpath("weather") .. "/weather.lua")
+
+-- Always load the API
+dofile(minetest.get_modpath(minetest.get_current_modname()) .. "/api.lua")
+
+-- Disable by mapgen or setting
+
+if minetest.settings:get_bool("enable_weather") == false then
+	return
+end
+
+local mg_name = minetest.get_mapgen_setting("mg_name")
+if mg_name == "indev" or mg_name == "v6" or mg_name == "singlenode" then
+	-- set a default shadow intensity for mgv6 and singlenode
+	minetest.register_on_joinplayer(function(player)
+		player:set_lighting({
+			shadows = { intensity = 0.33 },
+			bloom = { intensity = 0.05 },
+			volumetric_light = { strength = 0.2 },
+		})
+	end)
+end
+
+local cloud_height = tonumber(core.settings:get("cloud_height")) or weather.cloud_height or 120
+
+-- Default implementation for noise based cloud appearance
+
+local TSCALE = 600 -- Time scale of noise variation in seconds
+
+local np_thickness = {
+	offset = 0.5,
+	scale = 0.5,
+	spread = {x = TSCALE, y = TSCALE, z = TSCALE},
+	seed = 96,
+	octaves = 1,
+	persist = 0,
+	lacunarity = 2,
+}
+
+local np_speedx = {
+	offset = 0,
+	scale = 1,
+	spread = {x = TSCALE, y = TSCALE, z = TSCALE},
+	seed = 911923,
+	octaves = 1,
+	persist = 0,
+	lacunarity = 2,
+}
+
+local np_speedz = {
+	offset = 0,
+	scale = 1,
+	spread = {x = TSCALE, y = TSCALE, z = TSCALE},
+	seed = 5728,
+	octaves = 1,
+	persist = 0,
+	lacunarity = 2,
+}
+
+local nobj_thickness = nil
+local nobj_speedx = nil
+local nobj_speedz = nil
+
+local function rangelim(value, lower, upper)
+	return math.min(math.max(value, lower), upper)
+end
+
+local t_offset
+do
+	local meta = minetest.get_mod_storage()
+	if meta:contains("time_offset") then
+		t_offset = meta:get_int("time_offset")
+	else
+		-- Use random offset so not each new world behaves the same.
+		t_offset = math.random(0, 300000)
+		meta:set_int("time_offset", t_offset)
+	end
+end
+
+function weather.get(player)
+	-- Adjusted time in seconds
+	local time = math.floor(minetest.get_gametime() - t_offset)
+
+	nobj_thickness = nobj_thickness or minetest.get_perlin(np_thickness)
+	nobj_speedx = nobj_speedx or minetest.get_perlin(np_speedx)
+	nobj_speedz = nobj_speedz or minetest.get_perlin(np_speedz)
+
+	local n_thickness = nobj_thickness:get_2d({x = time, y = 0}) -- 0 to 1
+	local n_speedx = nobj_speedx:get_2d({x = time, y = 0}) -- -1 to 1
+	local n_speedz = nobj_speedz:get_2d({x = time, y = 0}) -- -1 to 1
+
+	-- Fallback to mid-value 50 for very old worlds
+	-- local humid = minetest.get_humidity(player:get_pos()) or 50
+	local ppos = player:get_pos()
+	local cloud_pos = {x = ppos.x, y = cloud_height, z = ppos.z}
+	local humid = minetest.get_humidity(cloud_pos) or 50
+	local density = weather.cloud_cover(cloud_pos, humid)
+	local speed = weather.cloud_speed(cloud_pos)
+
+	return {
+		clouds = {
+			density = density,
+			thickness = math.max(math.floor(
+				rangelim(12 + 28 * density, 4, 32) * n_thickness
+				), 2),
+			speed = {x = speed.x + n_speedx, z = speed.z + n_speedz},
+		},
+		lighting = {
+			shadows = { intensity = 0.7 * (1 - density) },
+			bloom = { intensity = 0.05 },
+			volumetric_light = { strength = 0.2 },
+		}
+	}
+end
+
+-- Bad place for footsteps
+core.register_globalstep(function(dtime)
+	for _, player in ipairs(core.get_connected_players()) do
+		local ppos = player:get_pos()
+		local pos = addvectors(ppos, {x=0, y=-1, z=0})
+		local node = core.get_node(pos)
+		if node.name == "default:dirt_with_grass" then
+			node.name = "default:dirt_with_grass_footsteps"
+			core.set_node(pos, node, 2)
+		end
+	end
+end)

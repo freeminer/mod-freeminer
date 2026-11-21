@@ -1,0 +1,2146 @@
+local root = 'mods/freeminer_portals/'
+local nodes, metas, callbacks, messages = {}, {}, {}, {}
+local timers = {}
+local function copy(value)
+    if type(value) ~= 'table' then
+        return value
+    end
+    local result = {}
+    for k, v in pairs(value) do
+        result[k] = copy(v)
+    end
+    return result
+end
+local function key(p)
+    return p.x .. ',' .. p.y .. ',' .. p.z
+end
+vector = {
+    offset = function(p, x, y, z)
+        return {
+            x = p.x + x,
+            y = p.y + y,
+            z = p.z + z,
+        }
+    end,
+    equals = function(a, b)
+        return key(a) == key(b)
+    end,
+}
+local protected = false
+local objects = {}
+local clock = 10000000
+local mapgen_limit = 31000
+local mapgen_edges
+local jobs = {}
+local saved_pairs = {}
+local persist_pairs = false
+local storage = {
+    get_string = function(_, key)
+        return persist_pairs and saved_pairs[key] or ''
+    end,
+    set_string = function(_, key, value)
+        if persist_pairs then
+            saved_pairs[key] = value
+        end
+    end,
+}
+-- A deterministic stand-in for the engine RNG, exercising seed isolation.
+PcgRandom = function(seed)
+    local state = seed % 2147483646 + 1
+    return {
+        next = function(_, low, high)
+            state = state * 48271 % 2147483647
+            return low + state % (high - low + 1)
+        end,
+    }
+end
+local immediate_seconds = 20
+core = {
+    get_mapgen_edges = function()
+        if mapgen_edges then return mapgen_edges[1], mapgen_edges[2] end
+        local limit = math.floor(mapgen_limit / 16) * 16
+        return {x = -limit, y = -limit, z = -limit}, {x = limit, y = limit, z = limit}
+    end,
+    get_mod_storage = function()
+        return storage
+    end,
+    settings = {
+        get_bool = function(_, _, fallback)
+            return fallback
+        end,
+        get = function(_, n)
+            if n == 'portals_search_attempts' then
+                return '1'
+            end
+            if n == 'portals_y_offset' then
+                return '10250'
+            end
+            return nil
+        end,
+    },
+    find_nodes_in_area = function()
+        return {}
+    end,
+    get_mapgen_setting = function(name)
+        if name == "mapgen_limit" then
+            return tostring(mapgen_limit)
+        end
+    end,
+    registered_nodes = {
+        air = {
+            walkable = false,
+        },
+        ['default:stone'] = {
+            walkable = true,
+        },
+        ['default:obsidian'] = {
+            walkable = true,
+        },
+        ['default:obsidian_block'] = {
+            walkable = true,
+        },
+    },
+    get_node = function(p)
+        return nodes[key(p)] or {
+            name = 'air',
+        }
+    end,
+    get_node_or_nil = function(p)
+        return core.get_node(p)
+    end,
+    set_node = function(p, n)
+        nodes[key(p)] = n;
+        metas[key(p)] = nil;
+        return true
+    end,
+    swap_node = function(p, n)
+        nodes[key(p)] = n;
+        return true
+    end,
+    remove_node = function(p)
+        nodes[key(p)] = nil;
+        metas[key(p)] = nil;
+        return true
+    end,
+    get_meta = function(p)
+        local k = key(p);
+        metas[k] = metas[k] or {};
+        local m = metas[k]
+        return {
+            set_string = function(_, k, v)
+                m[k] = v
+            end,
+            get_string = function(_, k)
+                return m[k] or ''
+            end,
+            set_int = function(_, k, v)
+                m[k] = v
+            end,
+            get_int = function(_, k)
+                return m[k] or 0
+            end,
+            to_table = function()
+                local fields = {}
+                for key, value in pairs(m) do
+                    if key:sub(1, 1) ~= '_' then
+                        fields[key] = copy(value)
+                    end
+                end
+                return {
+                    fields = fields,
+                    inventory = copy(m._inventory or {}),
+                    private_fields = copy(m._private or {}),
+                    inventory_widths = copy(m._widths or {}),
+                }
+            end,
+            from_table = function(_, data)
+                local restored = copy(data and data.fields or {})
+                restored._inventory = copy(data and data.inventory or {})
+                restored._private = copy(data and data.private_fields or {})
+                restored._widths = copy(data and data.inventory_widths or {})
+                metas[k] = restored
+                return true
+            end,
+        }
+    end,
+    get_node_timer = function(p)
+        local k = key(p)
+        return {
+            is_started = function()
+                return (timers[k] and timers[k].timeout or 0) > 0
+            end,
+            get_timeout = function()
+                return timers[k] and timers[k].timeout or 0
+            end,
+            get_elapsed = function()
+                return timers[k] and timers[k].elapsed or 0
+            end,
+            set = function(_, timeout, elapsed)
+                timers[k] = {
+                    timeout = timeout,
+                    elapsed = elapsed,
+                }
+            end,
+            stop = function()
+                timers[k] = nil
+            end,
+        }
+    end,
+    log = function()
+    end,
+    pos_to_string = key,
+    string_to_pos = function(s)
+        local x, y, z = s:match('^([%d.-]+),([%d.-]+),([%d.-]+)$');
+        if x then
+            return {
+                x = tonumber(x),
+                y = tonumber(y),
+                z = tonumber(z),
+            }
+        end
+    end,
+    is_protected = function()
+        return protected
+    end,
+    get_item_group = function(n)
+        return n == 'default:stone' and 1 or 0
+    end,
+    chat_send_player = function(_, s)
+        messages[#messages + 1] = s
+    end,
+    register_node = function(n, d)
+        core.registered_nodes[n] = d
+    end,
+    register_on_placenode = function(f)
+        callbacks.place = f
+    end,
+    register_abm = function(d)
+        callbacks.abm = d.action
+    end,
+    register_lbm = function(d)
+        callbacks.lbm = d.action
+    end,
+    register_globalstep = function(f)
+        callbacks.step = f
+    end,
+    after = function(delay, f)
+        if delay == 0 then
+            -- Model time spent generating each sampled region in this synchronous fixture.
+            clock = clock + immediate_seconds * 1000000
+            f()
+        else
+            jobs[#jobs + 1] = {
+                at = clock / 1000000 + delay,
+                run = f,
+            }
+        end
+    end,
+    emerge_area = function(a, b, f)
+        f(a, 0, 0)
+    end,
+    get_us_time = function()
+        return clock
+    end,
+    get_objects_inside_radius = function()
+        return objects
+    end,
+}
+local dest = {
+    x = 20,
+    y = -30900,
+    z = 20,
+}
+core.find_nodes_in_area_under_air = function()
+    return {dest}
+end
+for x = 20, 23 do
+    for z = 19, 21 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+local function frame()
+    for x = 0, 3 do
+        for y = 0, 4 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = 0,
+            })] = {
+                name = (x == 0 or x == 3 or y == 0 or y == 4) and 'default:obsidian' or 'air',
+            }
+        end
+    end
+end
+local player = {
+    is_player = function()
+        return true
+    end,
+    get_player_name = function()
+        return 'builder'
+    end,
+}
+dofile(root .. 'init.lua')
+frame();
+protected = true
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(#messages == 0, 'protected frame activated')
+protected = false
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'portals:portal', 'source not lit')
+assert(core.get_node({
+    x = 21,
+    y = -30898,
+    z = 20,
+}).name == 'portals:portal_up', 'destination not lit')
+assert(core.get_node({
+    x = 21,
+    y = -30899,
+    z = 20,
+}).name == 'default:obsidian_block', 'destination frame not raised above floor')
+for x = 20, 23 do
+    for z = 19, 21 do
+        assert(core.get_node({
+            x = x,
+            y = -30900,
+            z = z,
+        }).name == 'default:stone', 'cave floor was replaced')
+    end
+end
+local itempos = {
+    x = 1,
+    y = 1,
+    z = 0,
+}
+local velocity = {
+    x = 1,
+    y = 0,
+    z = 2,
+}
+local item_physical = true
+local item = {
+    is_player = function()
+        return false
+    end,
+    get_luaentity = function()
+        return {
+            name = '__builtin:item',
+        }
+    end,
+    get_properties = function()
+        return {
+            physical = item_physical,
+        }
+    end,
+    get_pos = function()
+        return itempos
+    end,
+    get_attach = function()
+    end,
+    get_velocity = function()
+        return velocity
+    end,
+    set_pos = function(_, p)
+        itempos = p
+    end,
+    set_velocity = function(_, v)
+        assert(v == velocity)
+    end,
+}
+objects = {item}
+callbacks.abm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+assert(itempos.y == -30898, 'item not teleported')
+callbacks.abm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+assert(itempos.y == -30898, 'cooldown failed')
+core.remove_node({
+    x = 0,
+    y = 2,
+    z = 0,
+})
+callbacks.abm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'air', 'broken frame stays active')
+callbacks.abm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+assert(core.get_node({
+    x = 21,
+    y = -30898,
+    z = 20,
+}).name == 'air', 'broken link stays active')
+frame();
+protected = false
+core.find_nodes_in_area_under_air = function()
+    return {}
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(messages[#messages]:find('timed out'), 'missing search failure')
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'air', 'failed search changed source')
+print('PASS: protection, paired activation, dropped item traversal, cooldown, broken links, bounded failure')
+-- Destination protection must reject the whole build, even with an open source.
+nodes, metas = {}, {}
+frame()
+core.find_nodes_in_area_under_air = function()
+    return {dest}
+end
+core.is_protected = function(p)
+    return p.y < -10000
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'air', 'protected destination activated')
+-- Exercise the perpendicular frame and the player-specific traversal path.
+core.is_protected = function()
+    return false
+end
+nodes, metas = {}, {}
+for z = 0, 3 do
+    for y = 0, 4 do
+        nodes[key({
+            x = 0,
+            y = y,
+            z = z,
+        })] = {
+            name = (z == 0 or z == 3 or y == 0 or y == 4) and 'default:obsidian' or 'air',
+        }
+    end
+end
+for x = 19, 21 do
+    for z = 20, 23 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_node({
+    x = 0,
+    y = 1,
+    z = 1,
+}).name == 'portals:portal', 'perpendicular frame not lit')
+local travellerpos = {
+    x = 0,
+    y = 1,
+    z = 1,
+}
+local traveller = {
+    is_player = function()
+        return true
+    end,
+    get_player_name = function()
+        return 'visitor'
+    end,
+    get_properties = function()
+        return {
+            physical = true,
+        }
+    end,
+    get_pos = function()
+        return travellerpos
+    end,
+    get_attach = function()
+    end,
+    get_velocity = function()
+        return velocity
+    end,
+    set_pos = function(_, p)
+        travellerpos = p
+    end,
+}
+objects = {traveller}
+core.is_protected = function(p, name)
+    return p.y < -10000 and name == 'visitor'
+end
+callbacks.abm({
+    x = 0,
+    y = 1,
+    z = 1,
+})
+assert(travellerpos.y == 1, 'player entered private destination')
+core.is_protected = function()
+    return false
+end
+callbacks.abm({
+    x = 0,
+    y = 1,
+    z = 1,
+})
+assert(travellerpos.y == -30898, 'player did not teleport')
+print('PASS: protected destinations, perpendicular frame, player access checks and traversal')
+
+-- Resting dropped items disable physics; they still need to cross portals.
+item_physical = false
+itempos = {
+    x = 0,
+    y = 1,
+    z = 1,
+}
+local sleeping = {}
+for k, v in pairs(item) do
+    sleeping[k] = v
+end
+objects = {sleeping}
+callbacks.abm({
+    x = 0,
+    y = 1,
+    z = 1,
+})
+assert(itempos.y == -30898, 'sleeping dropped item did not teleport')
+print('PASS: sleeping dropped items')
+-- Missing mapblocks must not be interpreted as a broken frame.
+local get_node_or_nil = core.get_node_or_nil
+core.get_node_or_nil = function(p)
+    if p.x == 0 and p.y == 4 and p.z == 0 then
+        return nil
+    end
+    return get_node_or_nil(p)
+end
+callbacks.abm({
+    x = 0,
+    y = 1,
+    z = 1,
+})
+assert(core.get_node({
+    x = 0,
+    y = 1,
+    z = 1,
+}).name == 'portals:portal', 'unloaded frame extinguished')
+core.get_node_or_nil = get_node_or_nil
+print('PASS: unloaded frame defers validation')
+-- A partially emerged region can contain a usable cave despite cancellations.
+nodes, metas = {}, {}
+frame()
+for x = 20, 23 do
+    for z = 19, 21 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+core.EMERGE_CANCELLED = 0
+core.EMERGE_ERRORED = 1
+core.emerge_area = function(a, b, f)
+    f(a, core.EMERGE_CANCELLED, 5)
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'portals:portal', 'partial region cave was discarded')
+print('PASS: cancelled/missing completion callbacks do not discard a safe loaded cave')
+-- No completion callback and no cave must report progress and eventually stop.
+nodes, metas = {}, {}
+frame()
+core.find_nodes_in_area_under_air = function()
+    return {}
+end
+local requests = 0
+local late_callback
+core.emerge_area = function(a, b, f)
+    requests = requests + 1
+    assert(a.y >= -30992 and b.y <= 30992, 'out-of-bounds emerge request')
+    late_callback = f
+end
+local random = PcgRandom
+PcgRandom = function()
+    return {
+        next = function(_, low)
+            return low
+        end,
+    }
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+PcgRandom = random
+for step = 1, 91 do
+    clock = clock + 2000000
+    local ready = jobs
+    jobs = {}
+    for _, job in ipairs(ready) do
+        if job.at <= clock / 1000000 then
+            job.run()
+        else
+            jobs[#jobs + 1] = job
+        end
+    end
+end
+assert(messages[#messages]:find('timed out'), 'stalled search did not time out')
+local progress = false
+for _, message in ipairs(messages) do
+    if message:find('still searching') then
+        progress = true
+    end
+end
+assert(progress, 'missing progress report')
+late_callback({
+    x = 0,
+    y = 0,
+    z = 0,
+}, 4, 0)
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(requests == 2, 'timeout did not release pending frame')
+print('PASS: map boundary clamping, progress, timeout, late callback and retry')
+-- Traversal must work on server steps without waiting for an ABM.
+nodes, metas = {}, {}
+frame()
+for x = 20, 23 do
+    for z = 19, 21 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+core.emerge_area = function(a, b, f)
+    f(a, 4, 0)
+end
+core.find_nodes_in_area_under_air = function()
+    return {dest}
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+travellerpos = {
+    x = 1,
+    y = 1,
+    z = 0.55,
+}
+objects = {traveller}
+callbacks.step(0.1)
+assert(travellerpos.y == -30898, 'server-step player traversal failed')
+callbacks.step(0.1)
+assert(travellerpos.y == -30898, 'server-step cooldown failed')
+clock = clock + 4100000
+callbacks.step(0.1)
+assert(travellerpos.y == 1, 'server-step return trip failed')
+-- Unload just the destination; dropped callbacks must not suppress later loads.
+local normal_node = core.get_node_or_nil
+core.get_node_or_nil = function(p)
+    if p.y < -10000 then
+        return nil
+    end
+    return normal_node(p)
+end
+requests = 0
+core.emerge_area = function()
+    requests = requests + 1
+end
+callbacks.step(0.1)
+assert(requests == 1, 'unloaded target was not requested')
+clock = clock + 11000000
+callbacks.step(0.1)
+assert(requests == 2, 'missing load callback prevented retry')
+core.get_node_or_nil = normal_node
+callbacks.step(0.1)
+assert(travellerpos.y == -30898, 'reloaded destination did not teleport')
+clock = clock + 4100000
+callbacks.step(0.1)
+assert(travellerpos.y == 1, 'reloaded destination was not tracked for return')
+-- Remove tracking as an unload would, then restore from persisted metadata.
+core.get_node_or_nil = function()
+    return nil
+end
+callbacks.step(0.1)
+core.get_node_or_nil = normal_node
+clock = clock + 4100000
+callbacks.lbm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+callbacks.step(0.1)
+assert(travellerpos.y == -30898, 'LBM did not restore traversal')
+print('PASS: server-step round trip, cooldown, destination load retry and LBM restoration')
+
+-- Region sequences depend only on frame coordinates and the search settings.
+local function regions(origin)
+    immediate_seconds = 11
+    nodes, metas = {}, {}
+    for u = 0, 3 do
+        for v = 0, 4 do
+            nodes[key(vector.offset(origin, u, v, 0))] = {
+                name = (u == 0 or u == 3 or v == 0 or v == 4) and 'default:obsidian' or 'air',
+            }
+        end
+    end
+    local sampled = {}
+    core.settings.get = function(_, name)
+        if name == 'portals_search_attempts' then
+            return '3'
+        end
+        if name == 'portals_y_offset' then
+            return '10250'
+        end
+        return nil
+    end
+    core.find_nodes_in_area_under_air = function()
+        return {}
+    end
+    core.emerge_area = function(a, b, f)
+        sampled[#sampled + 1] = key(a) .. ':' .. key(b)
+        f(a, 4, 0)
+    end
+    dofile(root .. 'init.lua')
+    callbacks.place(origin, {
+        name = 'default:obsidian',
+    }, player)
+    immediate_seconds = 20
+    assert(#sampled == 3, 'wrong number of deterministic attempts: ' .. #sampled)
+    return table.concat(sampled, ';')
+end
+local math_random = math.random
+math.random = function()
+    error('portal used shared random state')
+end
+local first = regions({
+    x = 0,
+    y = 0,
+    z = 0,
+})
+assert(first == regions({
+    x = 0,
+    y = 0,
+    z = 0,
+}), 'same frame changed search sequence')
+for _, axis in ipairs({'x', 'y', 'z'}) do
+    local origin = {
+        x = 0,
+        y = 0,
+        z = 0,
+    }
+    origin[axis] = 16
+    assert(first ~= regions(origin), 'coordinate axis did not influence search: ' .. axis)
+end
+math.random = math_random
+print('PASS: repeatable region sequences, all coordinate axes, isolated random state')
+
+-- Pair history survives broken openings and a reload of the mod.
+persist_pairs = true
+nodes, metas = {}, {}
+frame()
+for x = 20, 23 do
+    for z = 19, 21 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+core.settings.get = function(_, name)
+    if name == 'portals_search_attempts' then
+        return '1'
+    end
+    if name == 'portals_y_offset' then
+        return '10250'
+    end
+    return nil
+end
+core.find_nodes_in_area_under_air = function()
+    return {dest}
+end
+core.emerge_area = function(a, b, f)
+    f(a, 4, 0)
+end
+core.is_protected = function()
+    return false
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+local original_target = core.get_meta({
+    x = 1,
+    y = 1,
+    z = 0,
+}):get_string('target')
+assert(original_target ~= '', 'initial pair missing')
+-- Mimic old portals without pair records: surviving metadata must migrate.
+saved_pairs = {}
+callbacks.lbm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+assert(saved_pairs['pair:0:0,0,0'] == original_target, 'old pair did not migrate')
+core.remove_node({
+    x = 0,
+    y = 2,
+    z = 0,
+})
+callbacks.abm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+callbacks.abm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+assert(core.get_node({
+    x = 21,
+    y = -30898,
+    z = 20,
+}).name == 'air', 'remote opening not extinguished')
+frame()
+dofile(root .. 'init.lua')
+core.find_nodes_in_area_under_air = function()
+    error('reconnection searched for a new cave')
+end
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_meta({
+    x = 1,
+    y = 1,
+    z = 0,
+}):get_string('target') == original_target, 'rebuilt frame changed target')
+assert(core.get_node({
+    x = 21,
+    y = -30898,
+    z = 20,
+}).name == 'portals:portal_up', 'remote frame not relit')
+assert(messages[#messages]:find('reconnected'), 'missing reconnection report')
+-- The old target must still respect the rebuilding player's protection rights.
+core.remove_node({
+    x = 0,
+    y = 2,
+    z = 0,
+})
+callbacks.abm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+callbacks.abm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+frame()
+core.is_protected = function(p)
+    return p.y < -10000
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(messages[#messages]:find('previous portal is protected'), 'protected old frame was reused')
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'air', 'protected reconnection lit source')
+-- An old frame that has been dismantled must not be rebuilt over new nodes.
+core.is_protected = function()
+    return false
+end
+core.remove_node({
+    x = 20,
+    y = -30897,
+    z = 20,
+})
+core.find_nodes_in_area_under_air = function()
+    return {}
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(messages[#messages]:find('timed out'), 'broken old frame did not fall back to search')
+assert(core.get_node({
+    x = 20,
+    y = -30897,
+    z = 20,
+}).name == 'air', 'old frame was overwritten')
+print('PASS: persistent reconnection, old metadata migration, remote protection and invalid frame fallback')
+
+-- Recover a pre-update inactive cave frame with no surviving metadata/history.
+nodes, metas, saved_pairs = {}, {}, {}
+frame()
+local old = {
+    x = 20,
+    y = -30899,
+    z = 20,
+}
+for u = 0, 3 do
+    for v = 0, 4 do
+        nodes[key(vector.offset(old, u, v, 0))] = {
+            name = (u == 0 or u == 3 or v == 0 or v == 4) and 'default:obsidian' or 'air',
+        }
+    end
+end
+core.find_nodes_in_area = function()
+    return {old}
+end
+core.find_nodes_in_area_under_air = function()
+    error('existing old frame was not found')
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+assert(core.get_meta({
+    x = 1,
+    y = 1,
+    z = 0,
+}):get_string('target') == key(old), 'old frame not reused')
+assert(messages[#messages]:find('existing frame'), 'missing old frame recovery report')
+print('PASS: inactive legacy frame recovery without pair records')
+
+-- Default destinations are relative to source Y, not a fixed deep band.
+persist_pairs = false
+core.find_nodes_in_area = function()
+    return {}
+end
+core.find_nodes_in_area_under_air = function()
+    return {}
+end
+local function relative_range(source_y, extra, source_x, axis)
+    nodes, metas = {}, {}
+    local origin = {
+        x = source_x or 0,
+        y = source_y,
+        z = 0,
+    }
+    axis = axis or 0
+    for u = 0, 3 do
+        for v = 0, 4 do
+            nodes[key(vector.offset(origin, axis == 0 and u or 0, v, axis == 1 and u or 0))] = {
+                name = (u == 0 or u == 3 or v == 0 or v == 4) and 'default:obsidian' or 'air',
+            }
+        end
+    end
+    core.settings.get = function(_, name)
+        if name == 'portals_search_attempts' then
+            return '1'
+        end
+        if extra and extra[name] then
+            return name == 'portals_y_offset' and tostring(tonumber(extra[name]) / 3) or extra[name]
+        end
+        if name == 'portals_search_radius' then return '500' end
+        if name == 'portals_y_offset' then
+            return '10000'
+        end
+        return nil
+    end
+    local range
+    core.emerge_area = function(a, b, f)
+        range = {
+            a = a,
+            b = b,
+        };
+        f(a, 4, 0)
+    end
+    dofile(root .. 'init.lua')
+    callbacks.place(origin, {
+        name = 'default:obsidian',
+    }, player)
+    return range
+end
+for _, y in ipairs({0, 1000, -900}) do
+    local range = assert(relative_range(y))
+    assert(range.a.y >= math.max(-30992, y - 30502), 'search too low for source')
+    assert(range.b.y <= math.min(30992, y - 29495), 'search too high for source')
+end
+assert(not relative_range(-2000), 'out-of-world target was silently moved to boundary')
+assert(messages[#messages]:find('outside the world Y limits'), 'missing depth limit feedback')
+local range = assert(relative_range(1000, {
+    portals_y_offset = '10000',
+    portals_y_radius = '100',
+}))
+assert(range.a.y >= -9102 and range.b.y <= -8895, 'custom relative offset/radius ignored')
+print('PASS: relative default depth, source elevation, configurable offset/radius and world limits')
+
+-- Newly generated lower frames use obsidian blocks; source materials survive.
+persist_pairs = true
+saved_pairs, nodes, metas = {}, {}, {}
+frame()
+for x = 20, 23 do
+    for z = 19, 21 do
+        for y = -30901, -30900 do
+            nodes[key({
+                x = x,
+                y = y,
+                z = z,
+            })] = {
+                name = 'default:stone',
+            }
+        end
+    end
+end
+core.settings.get = function(_, name)
+    if name == 'portals_search_attempts' then
+        return '1'
+    end
+    if name == 'portals_y_offset' then
+        return '10250'
+    end
+    return nil
+end
+core.find_nodes_in_area = function()
+    return {}
+end
+core.find_nodes_in_area_under_air = function()
+    return {dest}
+end
+core.emerge_area = function(a, b, f)
+    f(a, 4, 0)
+end
+dofile(root .. 'init.lua')
+callbacks.place({
+    x = 0,
+    y = 0,
+    z = 0,
+}, {
+    name = 'default:obsidian',
+}, player)
+for u = 0, 3 do
+    for v = 0, 4 do
+        if u == 0 or u == 3 or v == 0 or v == 4 then
+            assert(core.get_node({
+                x = u,
+                y = v,
+                z = 0,
+            }).name == 'default:obsidian', 'source frame material changed')
+            assert(core.get_node({
+                x = 20 + u,
+                y = -30899 + v,
+                z = 20,
+            }).name == 'default:obsidian_block', 'lower frame material incorrect')
+        end
+    end
+end
+-- Replacing a lower frame block must reconnect the saved pair in reverse.
+local repaired = {
+    x = 20,
+    y = -30897,
+    z = 20,
+}
+core.remove_node(repaired)
+callbacks.abm({
+    x = 21,
+    y = -30898,
+    z = 20,
+})
+callbacks.abm({
+    x = 1,
+    y = 1,
+    z = 0,
+})
+core.set_node(repaired, {
+    name = 'default:obsidian_block',
+})
+core.find_nodes_in_area_under_air = function()
+    error('lower repair started a new cave search')
+end
+callbacks.place(repaired, {
+    name = 'default:obsidian_block',
+}, player)
+assert(core.get_node({
+    x = 1,
+    y = 1,
+    z = 0,
+}).name == 'portals:portal', 'lower repair did not relight source')
+assert(core.get_node({
+    x = 21,
+    y = -30898,
+    z = 20,
+}).name == 'portals:portal_up', 'lower repair did not relight destination')
+assert(core.get_node(repaired).name == 'default:obsidian_block', 'repair material changed')
+print('PASS: generated obsidian-block lower frame, preserved source and lower frame reconnection')
+
+-- An unpaired obsidian-block frame searches upward and builds obsidian above.
+persist_pairs = false
+nodes, metas = {}, {}
+core.registered_nodes['default:dirt_with_grass'] = {
+    walkable = true,
+}
+local low = {
+    x = 0,
+    y = -30000,
+    z = 0,
+}
+for u = 0, 3 do
+    for v = 0, 4 do
+        nodes[key(vector.offset(low, u, v, 0))] = {
+            name = (u == 0 or u == 3 or v == 0 or v == 4) and 'default:obsidian_block' or 'air',
+        }
+    end
+end
+local upper_floor = {
+    x = 20,
+    y = 0,
+    z = 20,
+}
+for x = 20, 23 do
+    for z = 19, 21 do
+        nodes[key({
+            x = x,
+            y = 0,
+            z = z,
+        })] = {
+            name = 'default:dirt_with_grass',
+        }
+    end
+end
+core.settings.get = function(_, name)
+    if name == 'portals_search_attempts' then
+        return '1'
+    end
+    if name == 'portals_y_offset' then
+        return '10000'
+    end
+    return nil
+end
+core.find_nodes_in_area = function()
+    return {}
+end
+core.find_nodes_in_area_under_air = function(_, _, names)
+    local soil = false
+    for _, name in ipairs(names) do
+        if name == 'default:dirt_with_grass' then
+            soil = true
+        end
+    end
+    assert(soil, 'upward search excluded safe soil surfaces')
+    return {upper_floor}
+end
+core.emerge_area = function(a, b, f)
+    assert(a.y >= -252 and b.y <= 255, 'obsidian-block frame did not search 30000 upward')
+    f(a, 4, 0)
+end
+dofile(root .. 'init.lua')
+callbacks.place(low, {
+    name = 'default:obsidian_block',
+}, player)
+assert(core.get_node({
+    x = 21,
+    y = 2,
+    z = 20,
+}).name == 'portals:portal', 'upper portal not lit')
+assert(core.get_node({
+    x = 21,
+    y = 1,
+    z = 20,
+}).name == 'default:obsidian', 'upper frame was not obsidian')
+assert(core.get_node({
+    x = 0,
+    y = -30000,
+    z = 0,
+}).name == 'default:obsidian_block', 'lower source material changed')
+assert(core.get_meta({
+    x = 1,
+    y = -29999,
+    z = 0,
+}):get_string('target') == key({
+    x = 20,
+    y = 1,
+    z = 20,
+}), 'upward link target wrong')
+print('PASS: obsidian-block upward search, safe soil footing and obsidian upper destination')
+
+assert(core.get_node({
+    x = 1,
+    y = -29999,
+    z = 0,
+}).name == 'portals:portal_up', 'upward source tint missing')
+assert(core.get_node({
+    x = 21,
+    y = 2,
+    z = 20,
+}).name == 'portals:portal', 'downward source tint changed')
+assert(core.registered_nodes['portals:portal_up'].tiles[1] ~= core.registered_nodes['portals:portal'].tiles[1],
+    'portal tints are identical')
+-- Old upward surfaces change color without losing their link or orientation.
+local old_cell = {
+    x = 1,
+    y = -29999,
+    z = 0,
+}
+local old_target = core.get_meta(old_cell):get_string('target')
+core.swap_node(old_cell, {
+    name = 'portals:portal',
+    param2 = 0,
+})
+objects = {}
+callbacks.abm(old_cell)
+assert(core.get_node(old_cell).name == 'portals:portal_up', 'legacy surface was not recolored')
+assert(core.get_meta(old_cell):get_string('target') == old_target, 'recoloring lost link metadata')
+print('PASS: distinct directional tints and legacy recoloring with preserved metadata')
+
+-- Mock large edges to exercise positions and settings beyond 31000.
+core.find_nodes_in_area_under_air = function()
+    return {}
+end
+mapgen_limit = 100000
+local high = assert(relative_range(90000, nil, 90000))
+assert(high.a.y >= 59498 and high.b.y <= 60505, 'large-world downward target clipped')
+assert(high.a.x > 79400, 'large-world X coordinate clipped')
+local deep = assert(relative_range(-50000))
+assert(deep.a.y >= -80502 and deep.b.y <= -79495, 'large-world deep target clipped')
+local far = assert(relative_range(90000, {
+    portals_y_offset = '150000',
+}))
+assert(far.a.y >= -60502 and far.b.y <= -59495, 'offset retained old 62000 cap')
+local rng = PcgRandom
+PcgRandom = function()
+    return {
+        next = function(_, low)
+            return low
+        end,
+    }
+end
+local wide = assert(relative_range(90000, {
+    portals_y_radius = '40000',
+}))
+assert(wide.a.y == 19998, 'vertical radius retained old 31000 cap')
+PcgRandom = rng
+assert(not relative_range(-71000), 'configured large-world boundary ignored')
+mapgen_limit = 31000
+print('PASS: simulated large edges, large X/Y coordinates, large offset/radius and boundary rejection')
+
+-- Frame direction chooses the normal axis; coordinates choose its sign.
+local original_rng = PcgRandom
+for axis = 0, 1 do
+    for sign = 0, 1 do
+        PcgRandom = function()
+            return {
+                next = function(_, lo, hi)
+                    if lo == 0 and hi == 1 then
+                        return sign
+                    end
+                    if lo < 0 and hi == -lo then
+                        return 0
+                    end
+                    return lo
+                end,
+            }
+        end
+        local region = assert(relative_range(0, nil, nil, axis))
+        local offset = sign == 0 and -20000 or 20000
+        assert(region.a.x + 10 == (axis == 1 and offset or 0), 'wrong X offset for frame orientation')
+        assert(region.a.z + 10 == (axis == 0 and offset or 0), 'wrong Z offset for frame orientation')
+    end
+end
+PcgRandom = function()
+    return {
+        next = function(_, lo, hi)
+            if lo == 0 and hi == 1 then
+                return 1
+            end
+            if lo < 0 and hi == -lo then
+                return 0
+            end
+            return lo
+        end,
+    }
+end
+local edge = assert(relative_range(0, nil, 30000, 1))
+assert(edge.a.x + 10 == 10000, 'out-of-bounds horizontal offset did not reverse')
+for axis = 0, 1 do
+    local disabled = assert(relative_range(0, {
+        portals_xz_offset = '0',
+    }, nil, axis))
+    assert(disabled.a.x + 10 == 0 and disabled.a.z + 10 == 0, 'horizontal offset could not be disabled')
+end
+mapgen_edges = {
+    {x = -35000, y = -30500, z = -3},
+    {x = 5000, y = 1000, z = 4},
+}
+local asymmetric = assert(relative_range(0, nil, 4000, 1))
+assert(asymmetric.a.x + 10 == -16000, 'asymmetric X edge did not reverse offset')
+assert(asymmetric.a.z == -3 and asymmetric.b.z == 4, 'Z emerge bounds ignored asymmetric edges')
+assert(asymmetric.a.y >= -30500 and asymmetric.b.y <= 1000, 'Y emerge bounds ignored edges')
+assert(not relative_range(-1000), 'search ignored lower Y edge')
+mapgen_edges = nil
+PcgRandom = original_rng
+print('PASS: frame-normal offsets, asymmetric mapgen edges, boundary reversal and disabled offset')
+
+-- A configured 500-node radius samples all axes within a 1000-node-wide window.
+local repeat_a = relative_range(1000)
+local repeat_b = relative_range(1000)
+assert(key(repeat_a.a) == key(repeat_b.a) and key(repeat_a.b) == key(repeat_b.b),
+    'coordinate-seeded search changed between retries')
+local window_rng = PcgRandom
+for _, endpoint in ipairs({-500, 500}) do
+    local samples = 0
+    PcgRandom = function()
+        return {next = function(_, lo, hi)
+            if lo == -500 and hi == 500 then
+                samples = samples + 1
+                return endpoint
+            end
+            return lo
+        end}
+    end
+    local region = assert(relative_range(1000, {portals_xz_offset = '0', portals_search_radius = '500'}))
+    assert(samples >= 2 and samples % 2 == 0, 'X and Z did not both sample the configured window')
+    assert(region.a.x >= -502 and region.b.x <= 505 and region.a.z >= -502 and region.b.z <= 502,
+        'sampled region exceeded target window plus frame padding')
+end
+PcgRandom = window_rng
+print('PASS: deterministic retries and configured 1000-node XYZ window')
+
+
+core.registered_nodes['test:water'] = {
+    liquidtype = 'source',
+    walkable = false,
+}
+core.registered_nodes['test:flow'] = {
+    liquidtype = 'flowing',
+    walkable = false,
+}
+core.registered_nodes['test:lava'] = {
+    liquidtype = 'source',
+    walkable = false,
+    damage_per_second = 8,
+}
+local function liquid_pair(axis, enabled)
+    nodes, metas = {}, {}
+    objects = {}
+    core.is_protected = function()
+        return false
+    end
+    core.settings.get_bool = function(_, name, fallback)
+        if name == 'portals_transfer_liquids' and enabled ~= nil then
+            return enabled
+        end
+        return fallback
+    end
+    dofile(root .. 'init.lua')
+    local a, b = {
+        x = 0,
+        y = 0,
+        z = 0,
+    }, {
+        x = 100,
+        y = -100,
+        z = 100,
+    }
+    local function at(p, u, v, d)
+        return vector.offset(p, axis == 0 and u or d, v, axis == 1 and u or d)
+    end
+    for _, pair in ipairs({{a, b, 'default:obsidian', 'portals:portal'},
+                           {b, a, 'default:obsidian_block', 'portals:portal_up'}}) do
+        for u = 0, 3 do
+            for v = 0, 4 do
+                local edge = u == 0 or u == 3 or v == 0 or v == 4
+                local q = at(pair[1], u, v, 0)
+                core.set_node(q, {
+                    name = edge and pair[3] or pair[4],
+                    param2 = axis,
+                })
+                if not edge then
+                    local meta = core.get_meta(q)
+                    meta:set_string('origin', key(pair[1]));
+                    meta:set_int('axis', axis)
+                    meta:set_string('target', key(pair[2]));
+                    meta:set_string('owner', 'builder')
+                end
+            end
+        end
+        callbacks.lbm(at(pair[1], 1, 1, 0))
+    end
+    return a, b, at
+end
+for axis = 0, 1 do
+    for _, side in ipairs({-1, 1}) do
+        for _, liquid in ipairs({'test:water', 'test:flow', 'test:lava'}) do
+            local a, b, at = liquid_pair(axis)
+            local source, dest = at(a, 1, 2, side), at(b, 1, 1, -side)
+            core.set_node(source, {
+                name = liquid,
+                param1 = 10,
+                param2 = 7,
+            })
+            callbacks.step(0.1)
+            assert(core.get_node(source).name == 'air', 'liquid source was duplicated')
+            local moved = core.get_node(dest)
+            assert(moved.name == liquid and moved.param2 == 7 and moved.param1 == 10, 'liquid state or position changed')
+            assert(core.get_node(at(a, 1, 0, side)).name == 'air', 'liquid immediately bounced back')
+        end
+    end
+end
+local a, b, at = liquid_pair(0)
+local source, dest = at(a, 1, 2, 1), at(b, 1, 1, -1)
+core.set_node(source, {
+    name = 'test:water',
+})
+core.set_node(dest, {
+    name = 'default:stone',
+})
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'test:water' and core.get_node(dest).name == 'default:stone',
+    'blocked target overwritten')
+core.remove_node(dest)
+for _, blocked in ipairs({source, dest}) do
+    core.is_protected = function(p)
+        return key(p) == key(blocked)
+    end
+    callbacks.step(0.1)
+    assert(core.get_node(source).name == 'test:water' and core.get_node(dest).name == 'air',
+        'protected liquid was moved')
+end
+core.is_protected = function()
+    return false
+end
+local get_node = core.get_node_or_nil
+core.get_node_or_nil = function(p)
+    if key(p) == key(dest) then
+        return nil
+    end
+    return get_node(p)
+end
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'test:water', 'liquid moved into unloaded target')
+core.get_node_or_nil = get_node
+local set_node = core.swap_node
+core.swap_node = function(p, n)
+    if key(p) == key(dest) then
+        return false
+    end
+    return set_node(p, n)
+end
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'test:water', 'failed placement removed liquid source')
+core.swap_node = set_node
+local remove_node = core.swap_node
+core.swap_node = function(p, n)
+    if key(p) == key(source) then
+        return false
+    end
+    return remove_node(p, n)
+end
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'test:water' and core.get_node(dest).name == 'air',
+    'failed removal duplicated liquid')
+core.swap_node = remove_node
+local a, b, at = liquid_pair(1, false)
+source, dest = at(a, 1, 2, 1), at(b, 1, 1, -1)
+core.set_node(source, {
+    name = 'test:water',
+})
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'test:water' and core.get_node(dest).name == 'air',
+    'disabled liquid transfer still ran')
+-- A lower portal transfers liquids upward as well, still one cell lower at exit.
+local a, b, at = liquid_pair(1)
+source, dest = at(b, 2, 3, -1), at(a, 2, 2, 1)
+core.set_node(source, {
+    name = 'test:flow',
+    param2 = 3,
+})
+callbacks.step(0.1)
+assert(core.get_node(source).name == 'air' and core.get_node(dest).name == 'test:flow', 'reverse transfer failed')
+print(
+    'PASS: liquid transfer, both axes/faces/directions, state preservation, air-only destinations, protection, failed writes, cooldown and disable setting')
+
+-- Move rich node state, including inventory stack data, widths and private flags.
+local a, b, at = liquid_pair(0)
+source, dest = at(a, 1, 2, 1), at(b, 1, 1, -1)
+core.set_node(source, {
+    name = 'test:flow',
+    param1 = 8,
+    param2 = 5,
+})
+local rich = {
+    fields = {
+        owner = 'builder',
+        secret = 'private value',
+        infotext = 'Custom liquid',
+    },
+    inventory = {
+        main = {{
+            name = 'default:stone',
+            count = 23,
+            wear = 120,
+            metadata = {
+                label = 'saved stack',
+            },
+        }, ''},
+    },
+    private_fields = {'secret'},
+    inventory_widths = {
+        main = 2,
+    },
+}
+core.get_meta(source):from_table(rich)
+core.get_node_timer(source):set(12.5, 3.25)
+core.get_meta(dest):from_table({
+    fields = {
+        old = 'air metadata',
+    },
+})
+core.get_node_timer(dest):set(99, 20)
+callbacks.step(0.1)
+local moved = core.get_meta(dest):to_table()
+assert(moved.fields.secret == 'private value' and moved.fields.old == nil, 'metadata not replaced')
+assert(moved.private_fields[1] == 'secret', 'private flags lost')
+assert(moved.inventory_widths.main == 2, 'inventory width lost')
+assert(moved.inventory.main[1].count == 23 and moved.inventory.main[1].metadata.label == 'saved stack',
+    'inventory stack data lost')
+assert(core.get_node_timer(dest):get_timeout() == 12.5 and core.get_node_timer(dest):get_elapsed() == 3.25,
+    'timer state lost')
+assert(next(core.get_meta(source):to_table().fields) == nil, 'source metadata not cleared')
+assert(not core.get_node_timer(source):is_started(), 'source timer not stopped')
+-- Metadata restore failures roll back the destination and leave source intact.
+local a, b, at = liquid_pair(0)
+source, dest = at(a, 1, 2, 1), at(b, 1, 1, -1)
+core.set_node(source, {
+    name = 'test:water',
+})
+core.get_meta(source):from_table(rich)
+core.get_meta(dest):from_table({
+    fields = {
+        old = 'preserve',
+    },
+})
+core.get_node_timer(dest):set(10, 2)
+local get_meta = core.get_meta
+local fail_once = true
+core.get_meta = function(p)
+    local meta = get_meta(p)
+    if key(p) == key(dest) and fail_once then
+        meta.from_table = function()
+            fail_once = false;
+            return false
+        end
+    end
+    return meta
+end
+callbacks.step(0.1)
+core.get_meta = get_meta
+assert(core.get_node(source).name == 'test:water' and core.get_meta(source):get_string('secret') == 'private value',
+    'failed move altered source')
+assert(core.get_node(dest).name == 'air' and core.get_meta(dest):get_string('old') == 'preserve',
+    'failed move did not restore target')
+assert(core.get_node_timer(dest):get_timeout() == 10 and core.get_node_timer(dest):get_elapsed() == 2,
+    'rollback lost destination timer')
+-- Source cleanup failure restores both endpoints, including their metadata.
+core.get_node_timer(source):set(12.5, 3.25)
+fail_once = true
+core.get_meta = function(p)
+    local meta = get_meta(p)
+    if key(p) == key(source) then
+        local from = meta.from_table
+        meta.from_table = function(self, data)
+            if data == nil and fail_once then
+                fail_once = false;
+                return false
+            end
+            return from(self, data)
+        end
+    end
+    return meta
+end
+callbacks.step(0.1)
+core.get_meta = get_meta
+assert(core.get_node(source).name == 'test:water' and core.get_meta(source):get_string('secret') == 'private value',
+    'cleanup failure lost source')
+assert(core.get_node_timer(source):get_elapsed() == 3.25, 'cleanup rollback lost timer')
+assert(core.get_node(dest).name == 'air' and core.get_meta(dest):get_string('old') == 'preserve',
+    'cleanup rollback left duplicate')
+print('PASS: rich metadata, inventory stack data and widths, privacy, timers, metadata failure and cleanup rollback')
+
+-- Variable-size frames retain full dimensions through every link operation.
+do
+    local original_rng = PcgRandom
+    PcgRandom = function()
+        return {
+            next = function(_, lo, hi)
+                if lo == 0 and hi == 1 then
+                    return 1
+                end
+                if lo < 0 and hi == -lo then
+                    return 0
+                end
+                return lo
+            end,
+        }
+    end
+    local function sized_pair(w, h, axis, last, options)
+        options = options or {}
+        nodes, metas, timers = {}, {}, {}
+        saved_pairs = {}
+        persist_pairs = true
+        objects = {}
+        mapgen_limit = 200000
+        core.settings.get = function(_, name)
+            if name == 'portals_search_attempts' then
+                return '1'
+            end
+            if name == 'portals_y_offset' then
+                return '10250'
+            end
+            if name == 'portals_max_frame_size' then
+                return options.limit and tostring(options.limit) or nil
+            end
+            return nil
+        end
+        core.settings.get_bool = function(_, _, fallback)
+            return fallback
+        end
+        local source = {
+            x = 0,
+            y = 0,
+            z = 0,
+        }
+        local floor = {
+            x = 20,
+            y = -math.floor(10250 * (h - 2) + 0.5) - 150,
+            z = 20,
+        }
+        local target = vector.offset(floor, 0, 1, 0)
+        local function at(p, u, v, d)
+            return vector.offset(p, axis == 0 and u or d or 0, v, axis == 1 and u or d or 0)
+        end
+        for u = 0, w - 1 do
+            for v = 0, h - 1 do
+                local edge = u == 0 or u == w - 1 or v == 0 or v == h - 1
+                core.set_node(at(source, u, v, 0), {
+                    name = edge and 'default:obsidian' or 'air',
+                })
+            end
+        end
+        for u = 0, w - 1 do
+            for d = -1, 1 do
+                core.set_node(at(floor, u, 0, d), {
+                    name = 'default:stone',
+                })
+            end
+        end
+        if options.blocked then
+            core.set_node(at(source, 1, 1, 0), {
+                name = 'default:stone',
+            })
+        end
+        core.is_protected = function(p)
+            return options.protected and key(p) == key(at(source, w - 1, h - 1, 0)) or false
+        end
+        local requests = {}
+        core.emerge_area = function(a, b, f)
+            requests[#requests + 1] = {
+                a = a,
+                b = b,
+            }
+            f(a, 4, 0)
+        end
+        core.find_nodes_in_area = function()
+            return {}
+        end
+        core.find_nodes_in_area_under_air = function()
+            return {floor}
+        end
+        dofile(root .. 'init.lua')
+        local placed = at(source, last[1], last[2], 0)
+        callbacks.place(placed, {
+            name = 'default:obsidian',
+        }, player)
+        return source, target, at, requests
+    end
+    for _, size in ipairs({{3, 3}, {4, 5}, {6, 5}, {5, 8}, {12, 4}, {4, 12}, {64, 3}}) do
+        local w, h = size[1], size[2]
+        for axis = 0, 1 do
+            local a, b, at, requests = sized_pair(w, h, axis, {w - 1, h - 1})
+            assert(#requests == 1, 'size not detected: ' .. w .. 'x' .. h)
+            local source_meta = core.get_meta(at(a, 1, 1, 0))
+            assert(source_meta:get_int('width') == w and source_meta:get_int('height') == h, 'source dimensions missing')
+            for u = 0, w - 1 do
+                for v = 0, h - 1 do
+                    local edge = u == 0 or u == w - 1 or v == 0 or v == h - 1
+                    assert(core.get_node(at(b, u, v, 0)).name ==
+                               (edge and 'default:obsidian_block' or 'portals:portal_up'),
+                        'destination size/material mismatch')
+                end
+            end
+            local distance = math.min(200000, math.floor(10000 * (w - 2) + 0.5))
+            local offset_axis = axis == 0 and 'z' or 'x'
+            assert(requests[1].a[offset_axis] + 10 == distance, 'horizontal distance did not scale with opening width')
+            local span_axis = axis == 0 and 'x' or 'z'
+            assert(requests[1].b[span_axis] >= w - 1, 'emerge bounds missed frame width')
+            assert(requests[1].a.y == -math.floor(10250 * (h - 2) + 0.5) - 502, 'vertical distance did not scale with opening height')
+        end
+    end
+    -- All four corners and side-center placements can complete a large frame.
+    for _, last in ipairs({{0, 0}, {5, 0}, {0, 6}, {5, 6}, {0, 3}, {5, 3}, {2, 0}, {2, 6}}) do
+        local _, _, _, requests = sized_pair(6, 7, 0, last)
+        assert(#requests == 1, 'completion node not detected: ' .. last[1] .. ',' .. last[2])
+    end
+    local _, _, _, requests = sized_pair(5, 6, 0, {0, 0}, {
+        blocked = true,
+    })
+    assert(#requests == 0, 'nonrectangular/obstructed opening activated')
+    local _, _, _, requests = sized_pair(6, 7, 1, {0, 0}, {
+        protected = true,
+    })
+    assert(#requests == 0, 'large protected frame activated')
+    local _, _, _, requests = sized_pair(9, 5, 0, {0, 0}, {
+        limit = 8,
+    })
+    assert(#requests == 0, 'oversized frame ignored configured limit')
+    local _, _, _, requests = sized_pair(9, 5, 0, {0, 0}, {
+        limit = 9,
+    })
+    assert(#requests == 1, 'configured size increase ignored')
+    -- Travel through the far upper corner, beyond the former fixed-size bounds.
+    local a, b, at = sized_pair(8, 10, 1, {7, 9})
+    local object_pos = at(a, 6, 8, 0)
+    local object = {
+        is_player = function()
+            return true
+        end,
+        get_player_name = function()
+            return 'builder'
+        end,
+        get_pos = function()
+            return object_pos
+        end,
+        get_properties = function()
+            return {}
+        end,
+        get_attach = function()
+        end,
+        get_velocity = function()
+            return {
+                x = 0,
+                y = 0,
+                z = 0,
+            }
+        end,
+        set_pos = function(_, p)
+            object_pos = p
+        end,
+    }
+    objects = {object}
+    local get_objects = core.get_objects_inside_radius
+    core.get_objects_inside_radius = function(center, radius)
+        local dx, dy, dz = object_pos.x - center.x, object_pos.y - center.y, object_pos.z - center.z
+        return dx * dx + dy * dy + dz * dz <= radius * radius and objects or {}
+    end
+    callbacks.step(0.1)
+    assert(key(object_pos) == key(at(b, 6, 8, 0)), 'far-corner travel failed or vertical offset lost')
+    core.get_objects_inside_radius = get_objects
+    objects = {}
+    local liquid_source, liquid_dest = at(a, 6, 8, 1), at(b, 6, 7, -1)
+    core.set_node(liquid_source, {
+        name = 'test:flow',
+        param2 = 6,
+    })
+    callbacks.step(0.1)
+    assert(core.get_node(liquid_source).name == 'air' and core.get_node(liquid_dest).name == 'test:flow',
+        'far-corner liquid transfer failed')
+    -- Break the large frame and verify cleanup/reconnection covers every cell.
+    core.remove_node(at(a, 7, 9, 0))
+    callbacks.abm(at(a, 1, 1, 0))
+    assert(core.get_node(at(a, 6, 8, 0)).name == 'air', 'large source cleanup missed far corner')
+    callbacks.abm(at(b, 1, 1, 0))
+    assert(core.get_node(at(b, 6, 8, 0)).name == 'air', 'large destination cleanup missed far corner')
+    core.set_node(at(a, 7, 9, 0), {
+        name = 'default:obsidian',
+    })
+    core.find_nodes_in_area_under_air = function()
+        error('large saved pair unexpectedly searched for a cave')
+    end
+    dofile(root .. 'init.lua')
+    callbacks.place(at(a, 7, 9, 0), {
+        name = 'default:obsidian',
+    }, player)
+    assert(core.get_node(at(b, 6, 8, 0)).name == 'portals:portal_up', 'large saved frame not relit')
+    assert(core.get_meta(at(b, 6, 8, 0)):get_int('height') == 10, 'reconnection lost size')
+    -- Restore tracking from metadata after another mod reload.
+    dofile(root .. 'init.lua')
+    callbacks.lbm(at(a, 6, 8, 0))
+    clock = clock + 5000000
+    object_pos = at(a, 6, 8, 0)
+    objects = {object}
+    callbacks.step(0.1)
+    assert(key(object_pos) == key(at(b, 6, 8, 0)), 'loaded large portal lost dimensions')
+    objects = {}
+    PcgRandom = original_rng
+    mapgen_limit = 31000
+    print(
+        'PASS: variable rectangles, width/height-scaled distances, all completion edges, limits, full opening transfers, cleanup, reconnection and reload')
+end
+
+-- Horizontal X/Z frames sample the target window and preserve their full footprint.
+do
+    local function flat_pair(w, h, upward, options)
+        options = options or {}
+        nodes, metas, timers, saved_pairs = {}, {}, {}, {}
+        objects = {}
+        persist_pairs = true
+        mapgen_limit = 1000000
+        core.settings.get = function(_, name)
+            if name == 'portals_search_attempts' then
+                return '1'
+            end
+            if name == 'portals_search_radius' then return '500' end
+            if name == 'portals_y_offset' then
+                return '10000'
+            end
+            return nil
+        end
+        core.settings.get_bool = function(_, name, fallback)
+            if name == "portals_spawn_in_liquids" and options.disable_liquids then return false end
+            if name == "portals_safe_destination" then return options.safe or false end
+            return fallback
+        end
+        local a = {
+            x = 25,
+            y = upward and -10000 or 100,
+            z = 35,
+        }
+        local b = {
+            x = a.x,
+            y = a.y + (upward and 1 or -1) * math.floor(10000 * (w - 2) * (h - 2) + 0.5),
+            z = a.z,
+        }
+        local material = upward and 'default:obsidian_block' or 'default:obsidian'
+        local function at(p, u, v, d)
+            return vector.offset(p, u, d or 0, v)
+        end
+        for u = 0, w - 1 do
+            for v = 0, h - 1 do
+                local edge = u == 0 or u == w - 1 or v == 0 or v == h - 1
+                core.set_node(at(a, u, v), {
+                    name = edge and material or 'air',
+                })
+                core.set_node(at(b, u, v, -4), {
+                    name = 'default:stone',
+                })
+            end
+        end
+        if options.liquid then
+            core.registered_nodes['test:destination_liquid'] = {
+                walkable = options.solid_liquid or false,
+                damage_per_second = options.damage or 0,
+                liquidtype = 'source',
+            }
+            for u = 0, w - 1 do
+                for v = 0, h - 1 do
+                    for d = -3, 3 do
+                        core.set_node(at(b, u, v, d), {name = 'test:destination_liquid'})
+                    end
+                end
+            end
+        end
+        if options.obstruction then
+            core.set_node(at(b, w - 2, h - 2, 2), {
+                name = 'default:stone',
+            })
+        end
+        core.is_protected = function(q)
+            if options.protected then
+                return key(q) == key(at(b, w - 2, h - 2, 2))
+            end
+            return false
+        end
+        local requests = {}
+        core.emerge_area = function(lo, hi, f)
+            requests[#requests + 1] = {
+                a = lo,
+                b = hi,
+            }
+            f(lo, 4, 0)
+        end
+        core.find_nodes_in_area = function(lo, hi, names)
+            assert(lo.x >= a.x - 500 and hi.x <= a.x + 500 and lo.z >= a.z - 500 and hi.z <= a.z + 500, 'flat search outside window')
+            if options.liquid and names[1] == 'group:stone' then return {at(b, 0, 0, -4)} end
+            return {}
+        end
+        core.find_nodes_in_area_under_air = function(lo, hi)
+            assert(hi.x - lo.x <= 16 and hi.z - lo.z <= 16, 'flat search must use small sampled regions')
+            if options.liquid then return {} end
+            return {at(b, options.wrong_column and 1 or 0, 0, -4)}
+        end
+        dofile(root .. 'init.lua')
+        callbacks.place(at(a, w - 1, h - 1), {
+            name = material,
+        }, player)
+        return a, b, at, requests
+    end
+    for _, size in ipairs({{3, 3}, {4, 5}, {6, 7}, {9, 4}}) do
+        local w, h = size[1], size[2]
+        for _, upward in ipairs({false, true}) do
+            local a, b, at, requests = flat_pair(w, h, upward)
+            assert(#requests == 1, 'horizontal frame not detected')
+            local meta = core.get_meta(at(a, 1, 1))
+            assert(meta:get_int('axis') == 2 and meta:get_int('width') == w and meta:get_int('height') == h,
+                'flat metadata wrong')
+            assert(meta:get_string('target') == key(b), 'flat link has horizontal displacement')
+            assert(requests[1].a.x >= a.x - 504 and requests[1].a.z >= a.z - 504, 'flat load minimum outside window')
+            assert(requests[1].b.x - requests[1].a.x >= w + 7 and requests[1].b.z - requests[1].a.z >= h + 7, 'flat load footprint incomplete')
+            for u = 0, w - 1 do
+                for v = 0, h - 1 do
+                    local edge = u == 0 or u == w - 1 or v == 0 or v == h - 1
+                    local name = core.get_node(at(b, u, v)).name
+                    assert(name == (edge and (upward and 'default:obsidian' or 'default:obsidian_block') or
+                               (upward and 'portals:portal' or 'portals:portal_up')),
+                        'flat destination geometry/material wrong')
+                    if not edge then
+                        assert(core.get_node(at(b, u, v)).param2 == 4, 'surface not rotated flat')
+                    end
+                end
+            end
+        end
+    end
+    for _, options in ipairs({{liquid = true}, {liquid = true, damage = 4},
+        {liquid = true, solid_liquid = true}, {liquid = true, disable_liquids = true},
+        {liquid = true, protected = true}, {liquid = true, safe = true},
+        {liquid = true, safe = true, damage = 4}, {liquid = true, safe = true, solid_liquid = true}}) do
+        local a, b, at = flat_pair(4, 5, false, options)
+        local expected = (not options.safe or not options.damage and not options.solid_liquid) and not options.disable_liquids
+            and not options.protected
+        assert((core.get_node(at(a, 1, 1)).name == 'portals:portal') == expected,
+            'submerged destination acceptance ignored liquid safety, protection or setting')
+        if expected then
+            assert(core.get_node(at(b, 1, 1, 2)).name == 'test:destination_liquid',
+                'submerged portal drained surrounding liquid')
+        end
+    end
+    print('PASS: submerged destination discovery, safe liquids, protection and disable setting')
+    local a, b, at = flat_pair(6, 7, false, {
+        obstruction = true,
+    })
+    assert(core.get_node(at(a, 1, 1)).name == 'air', 'flat cave with obstructed headroom accepted')
+    local a, b, at = flat_pair(6, 7, false, {
+        protected = true,
+    })
+    assert(core.get_node(at(a, 1, 1)).name == 'air', 'flat protected cave accepted')
+    local a, b, at = flat_pair(6, 7, false, {
+        wrong_column = true,
+    })
+    assert(core.get_node(at(a, 1, 1)).name == 'air', 'flat destination shifted to a different column')
+    local a, b, at = flat_pair(6, 7, false)
+    local pos = at(a, 3.2, 4.1, 0.3)
+    local object = {
+        is_player = function()
+            return true
+        end,
+        get_player_name = function()
+            return 'builder'
+        end,
+        get_pos = function()
+            return pos
+        end,
+        get_properties = function()
+            return {}
+        end,
+        get_attach = function()
+        end,
+        get_velocity = function()
+            return {
+                x = 0,
+                y = -2,
+                z = 0,
+            }
+        end,
+        set_pos = function(_, q)
+            pos = q
+        end,
+    }
+    objects = {object}
+    callbacks.step(0.1)
+    assert(pos.x == b.x + 3.2 and pos.z == b.z + 4.1 and pos.y < b.y - 1.75,
+        'falling player did not exit below flat plane')
+    local saved_pos = copy(pos)
+    callbacks.step(0.1)
+    assert(key(pos) == key(saved_pos), 'horizontal portal bounced object back')
+    clock = clock + 5000000
+    pos = at(b, 3.2, 4.1, -0.3)
+    callbacks.step(0.1)
+    assert(pos.x == a.x + 3.2 and pos.z == a.z + 4.1 and pos.y > a.y + 0.6,
+        'rising player did not exit above flat plane')
+    -- Destination changes after linking must not place a player inside solid nodes.
+    clock = clock + 5000000
+    pos = at(a, 1, 1, 0.3)
+    local obstacle = at(b, 1, 1, -2)
+    core.set_node(obstacle, {
+        name = 'default:stone',
+    })
+    callbacks.step(0.1)
+    assert(pos.y > a.y, 'blocked horizontal exit teleported player')
+    core.remove_node(obstacle)
+    callbacks.step(0.1)
+    assert(pos.y < b.y, 'cleared horizontal exit did not resume traversal')
+    objects = {}
+    local from, to = at(a, 4, 5, 1), at(b, 4, 5, -2)
+    core.set_node(from, {
+        name = 'test:flow',
+        param2 = 5,
+    })
+    core.get_meta(from):set_string('payload', 'flat liquid state')
+    callbacks.step(0.1)
+    assert(core.get_node(from).name == 'air' and core.get_node(to).name == 'test:flow',
+        'horizontal liquid mapping wrong')
+    assert(core.get_meta(to):get_string('payload') == 'flat liquid state', 'horizontal liquid metadata lost')
+    -- Opposite-face-minus-one-down would hit the surface from below: air-only
+    -- transfer must leave that liquid alone and preserve the portal cell.
+    from = at(a, 2, 2, -1)
+    core.set_node(from, {
+        name = 'test:water',
+    })
+    callbacks.step(0.1)
+    assert(core.get_node(from).name == 'test:water' and core.get_node(at(b, 2, 2)).name == 'portals:portal_up',
+        'flat liquid overwrote surface')
+    -- Saved pair geometry remains flat across cleanup, repair and mod reload.
+    core.remove_node(at(a, 5, 6))
+    callbacks.abm(at(a, 1, 1))
+    callbacks.abm(at(b, 1, 1))
+    assert(core.get_node(at(a, 4, 5)).name == 'air' and core.get_node(at(b, 4, 5)).name == 'air',
+        'flat cleanup missed opening')
+    core.set_node(at(a, 5, 6), {
+        name = 'default:obsidian',
+    })
+    core.find_nodes_in_area_under_air = function()
+        error('flat saved pair did not reconnect')
+    end
+    dofile(root .. 'init.lua')
+    callbacks.place(at(a, 5, 6), {
+        name = 'default:obsidian',
+    }, player)
+    assert(core.get_node(at(b, 4, 5)).name == 'portals:portal_up' and core.get_node(at(b, 4, 5)).param2 == 4,
+        'flat saved partner not relit')
+    dofile(root .. 'init.lua')
+    callbacks.lbm(at(a, 4, 5))
+    clock = clock + 5000000
+    pos = at(a, 1, 1, 0.3)
+    objects = {object}
+    callbacks.step(0.1)
+    assert(pos.y < b.y, 'flat loaded portal did not restore traversal')
+    objects = {}
+    mapgen_limit = 31000
+    print(
+        'PASS: horizontal detection, XYZ search window, up/down search, dimensions, facing, clearance, traversal sides, fluids, repair and reload')
+end
