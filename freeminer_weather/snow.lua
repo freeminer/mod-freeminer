@@ -1,3 +1,4 @@
+if not weather.game.voxelibre then
 minetest.register_craft({
 	output = 'default:ice',
 	recipe = {
@@ -5,6 +6,8 @@ minetest.register_craft({
 		{'default:snow', 'default:snow'},
 	}
 })
+
+end
 
 -- Snow
 core.register_globalstep(function(dtime)
@@ -59,6 +62,9 @@ core.register_globalstep(function(dtime)
 		end
 	end
 end)
+
+-- VoxeLibre represents snow layers as separate nodes.
+if weather.game.voxelibre then return end
 
 local snow_box =
 {

@@ -6,7 +6,7 @@ local wagon_setting = minetest.settings:get("arnis_train_wagon") or ""
 local owner = minetest.settings:get("arnis_train_owner") or ""
 local storage = minetest.get_mod_storage()
 
-minetest.register_node(marker, {
+minetest.register_node(":" .. marker, {
     description = "Arnis train spawn marker",
     drawtype = "airlike",
     paramtype = "light",
@@ -166,7 +166,7 @@ end
 
 minetest.register_lbm({
     label = "Spawn generated Arnis trains",
-    name = "freeminer:arnis_trains",
+    name = (minetest.get_current_modname() == "freeminer" and "freeminer:" or "freeminer_arnis:") .. "arnis_trains",
     nodenames = {marker},
     run_at_every_load = true,
     action = function(pos)

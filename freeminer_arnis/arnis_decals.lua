@@ -19,7 +19,7 @@ local function rotation_for(facing, turn)
 	return {x = 0, y = 0, z = -r}
 end
 
-minetest.register_node("freeminer:arnis_decal_frame", {
+minetest.register_node(":freeminer:arnis_decal_frame", {
 	description = "Arnis decal frame",
 	drawtype = "airlike",
 	paramtype = "light",
@@ -31,7 +31,7 @@ minetest.register_node("freeminer:arnis_decal_frame", {
 	groups = {not_in_creative_inventory = 1},
 })
 
-minetest.register_entity(entity_name, {
+minetest.register_entity(":" .. entity_name, {
 	initial_properties = {
 		visual = "mesh",
 		mesh = "arnis_decal.obj",
@@ -103,7 +103,7 @@ end
 
 minetest.register_lbm({
 	label = "Restore Arnis decal displays",
-	name = "freeminer:restore_arnis_decal_displays",
+	name = (minetest.get_current_modname() == "freeminer" and "freeminer:" or "freeminer_arnis:") .. "restore_arnis_decal_displays",
 	nodenames = {"freeminer:arnis_decal_frame"},
 	run_at_every_load = true,
 	action = spawn_display,

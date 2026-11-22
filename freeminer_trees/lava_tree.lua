@@ -1,4 +1,4 @@
-local tree_game = dofile(minetest.get_modpath("freeminer") .. "/fm_tree_compat.lua")
+local tree_game = dofile(minetest.get_modpath("freeminer_trees") .. "/fm_tree_compat.lua")
 
 -- Deep mineral trees sustained by lava. Living nodes are custom and hot, but
 -- cooling and digging yield only ordinary stone or obsidian.

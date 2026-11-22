@@ -17,12 +17,13 @@ minetest.register_craft({output = "default:sandstone 2", recipe = {
 }})
 minetest.register_craft({output = "default:sand 2", recipe = {{"default:sandstone"}}})
 
-dofile(minetest.get_modpath("freeminer") .. "/fm_mapgen_layers.lua")
+local mapgen_path = minetest.get_modpath("freeminer") or minetest.get_modpath("freeminer_mapgen")
+if mapgen_path then dofile(mapgen_path .. "/fm_mapgen_layers.lua") end
 
 -- The original game registers these after its regular ores. Respect the
 -- current world's bounds when installing them after Minetest Game's mapgen.
 local mg_name = minetest.get_mapgen_setting("mg_name")
-if mg_name ~= "v6" and mg_name ~= "indev" then
+if mapgen_path and mg_name ~= "v6" and mg_name ~= "indev" then
 	local register_ore = minetest.register_ore
 	local min_edge, max_edge = minetest.get_mapgen_edges()
 	minetest.register_ore = function(def)
@@ -30,13 +31,13 @@ if mg_name ~= "v6" and mg_name ~= "indev" then
 		if def.y_max == 31000 then def.y_max = max_edge.y end
 		return register_ore(def)
 	end
-	local ok, err = pcall(dofile, minetest.get_modpath("freeminer") .. "/fm_mapgen_ores.lua")
+	local ok, err = pcall(dofile, mapgen_path .. "/fm_mapgen_ores.lua")
 	minetest.register_ore = register_ore
 	if not ok then error(err) end
 end
 
 if minetest.get_modpath("fire") and minetest.registered_nodes["fire:basic_flame"] then
-	local fm_fire = dofile(minetest.get_modpath("freeminer") .. "/fm_fire.lua")
+	local fm_fire = dofile((minetest.get_modpath("freeminer") or minetest.get_modpath("freeminer_nodes")) .. "/fm_fire.lua")
 	local enabled = minetest.settings:get("enable_fire") or "auto"
 	if enabled == "auto" then
 		enabled = minetest.is_singleplayer() and not minetest.settings:get_bool("disable_fire")

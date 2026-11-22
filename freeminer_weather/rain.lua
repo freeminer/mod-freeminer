@@ -35,6 +35,9 @@ core.register_globalstep(function(dtime)
 	end
 end)
 
+-- VoxeLibre uses its own liquid levels and precipitation ABMs.
+if weather.game.voxelibre then return end
+
 local rain_drawtypes = {
 	normal = true,
 	nodebox = true,

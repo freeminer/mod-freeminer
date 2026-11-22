@@ -1,3 +1,6 @@
+weather = rawget(_G, "weather") or {}
+weather.game = dofile(core.get_modpath("weather") .. "/fm_game.lua")
+
 
 dofile(core.get_modpath("weather") .. "/weather.lua")
 
@@ -7,6 +10,11 @@ dofile(minetest.get_modpath(minetest.get_current_modname()) .. "/api.lua")
 -- Disable by mapgen or setting
 
 if minetest.settings:get_bool("enable_weather") == false then
+	return
+end
+
+-- VoxeLibre's weather controller owns player lighting and cloud settings.
+if weather.game.native_weather then
 	return
 end
 
@@ -93,6 +101,7 @@ function weather.get(player)
 	-- Fallback to mid-value 50 for very old worlds
 	-- local humid = minetest.get_humidity(player:get_pos()) or 50
 	local ppos = player:get_pos()
+	if not weather.has_weather(ppos) then return {} end
 	local cloud_pos = {x = ppos.x, y = cloud_height, z = ppos.z}
 	local humid = minetest.get_humidity(cloud_pos) or 50
 	local density = weather.cloud_cover(cloud_pos, humid)
@@ -114,7 +123,8 @@ function weather.get(player)
 	}
 end
 
--- Bad place for footsteps
+-- Default Game has a distinct footprints node; VoxeLibre does not.
+if not weather.game.voxelibre then
 core.register_globalstep(function(dtime)
 	for _, player in ipairs(core.get_connected_players()) do
 		local ppos = player:get_pos()
@@ -126,3 +136,5 @@ core.register_globalstep(function(dtime)
 		end
 	end
 end)
+
+end

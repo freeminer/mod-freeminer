@@ -1,4 +1,4 @@
-local tree_game = dofile(minetest.get_modpath("freeminer") .. "/fm_tree_compat.lua")
+local tree_game = dofile(minetest.get_modpath("freeminer_trees") .. "/fm_tree_compat.lua")
 
 -- A tree made entirely from ice and snow. Growth is procedural so the ice
 -- trunk can retain correct transparent lighting without using param1 as the

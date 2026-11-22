@@ -147,9 +147,15 @@ function weather.wind_target(pos, scale, limit, chance_scale)
 	return {x = pos.x + dx, y = pos.y, z = pos.z + dz}
 end
 
+function weather.has_weather(pos)
+	local worlds = rawget(_G, "mcl_worlds")
+	return not weather.game.voxelibre or not worlds or worlds.has_weather(pos)
+end
+
 function weather.exposed_to_sky(pos, tolerance)
+	if not weather.has_weather(pos) then return false end
 	local light = core.get_node_light(pos, 0.5)
-	if not light or light < default.LIGHT_SUN - (tolerance or 0) then
+	if not light or light < weather.game.light_sun - (tolerance or 0) then
 		return false
 	end
 
@@ -254,7 +260,7 @@ function weather.precipitation_factor(pos, humidity)
 end
 
 get_snow = function (p, visible)
-	if not p then return 0 end
+	if not p or not weather.has_weather(p) then return 0 end
 	if visible and p.y > cloud_height then return 0 end
 	local heat = core.get_heat(p)
 	if heat > 2 then return 0 end
@@ -266,7 +272,7 @@ get_snow = function (p, visible)
 end
 
 get_rain = function (p, visible)
-	if not p then return 0 end
+	if not p or not weather.has_weather(p) then return 0 end
 	if visible and p.y > cloud_height then return 0 end
 	local heat = core.get_heat(p)
 	if heat < -2 then return 0 end
@@ -278,7 +284,15 @@ get_rain = function (p, visible)
 	return ((humidity-rain_humidity)/(100-rain_humidity)) * phase * precip
 end
 
-if default.weather then
+if weather.game.enabled and weather.game.voxelibre then
+	dofile(core.get_modpath("weather") .. "/fm_voxelibre.lua")
+	if not weather.game.native_weather then
+		if core.settings:get_bool("liquid_real") then
+			dofile(core.get_modpath("weather") .. "/rain.lua")
+		end
+		dofile(core.get_modpath("weather") .. "/snow.lua")
+	end
+elseif weather.game.enabled then
 	if core.settings:get_bool("liquid_real") then
 		dofile(core.get_modpath("weather").."/rain.lua")
 		dofile(core.get_modpath("weather").."/erosion.lua")
@@ -287,7 +301,7 @@ if default.weather then
 	dofile(core.get_modpath("weather").."/snow.lua")
 end
 
-if default.weather then
+if weather.game.enabled and not weather.game.voxelibre then
 local grass_heat_max = 51
 local grass_heat_max2 = 71
 local grass_humidity_min = 4

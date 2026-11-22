@@ -97,7 +97,26 @@ local erosion_rules = {
 	},
 }
 
-if erosion_cobble then
+if weather.game.voxelibre then
+	water_nodes = {"mcl_core:water_flowing"}
+	deposit_rules = {
+		["mcl_core:sand"] = "mcl_core:dirt",
+		["mcl_core:redsand"] = "mcl_core:dirt",
+	}
+	erosion_rules = {
+		["mcl_core:stone"] = {to = "mcl_core:gravel", resistance = 1.0},
+		["mcl_core:granite"] = {to = "mcl_core:gravel", resistance = 1.0},
+		["mcl_core:andesite"] = {to = "mcl_core:gravel", resistance = 1.0},
+		["mcl_core:diorite"] = {to = "mcl_core:gravel", resistance = 1.0},
+		["mcl_core:sandstone"] = {to = "mcl_core:sand", resistance = 0.6},
+		["mcl_core:redsandstone"] = {to = "mcl_core:redsand", resistance = 0.6},
+		["mcl_core:gravel"] = {to = "mcl_core:dirt", resistance = 0.35, needs_humidity = 55},
+		["mcl_core:dirt_with_grass"] = {to = "mcl_core:dirt", resistance = 0.25},
+		["mcl_core:clay"] = {to = "mcl_core:dirt", resistance = 0.3, needs_humidity = 65},
+	}
+end
+
+if erosion_cobble and not weather.game.voxelibre then
 	erosion_rules["default:cobble"] = {
 		to = "default:gravel",
 		resistance = 0.8,
@@ -111,6 +130,11 @@ if erosion_cobble then
 		to = "default:desert_sand",
 		resistance = 0.7,
 	}
+end
+
+if erosion_cobble and weather.game.voxelibre then
+	erosion_rules["mcl_core:cobble"] = {to = "mcl_core:gravel", resistance = 0.8}
+	erosion_rules["mcl_core:mossycobble"] = {to = "mcl_core:gravel", resistance = 0.6, needs_humidity = 45}
 end
 
 local trigger_nodes = {}
@@ -138,7 +162,10 @@ core.register_core_abm({
 	name = "weather:erosion",
 	action = "erosion",
 	nodenames = trigger_nodes,
-	neighbors = {"air", "default:water_flowing", "default:river_water_flowing"},
+	neighbors = weather.game.voxelibre and {"air", "mcl_core:water_flowing"} or
+		{"air", "default:water_flowing", "default:river_water_flowing"},
+	min_y = weather.game.voxelibre and mcl_vars.mg_overworld_min or nil,
+	max_y = weather.game.voxelibre and mcl_vars.mg_overworld_max or nil,
 	interval = erosion_debug and 1 or 180.0,
 	chance = erosion_debug and 1 or 40,
 	catch_up = true,

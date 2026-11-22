@@ -892,7 +892,7 @@ core.register_on_mods_loaded(function()
     end
 end)
 
-core.register_node("freeminer:lamp_red", {
+core.register_node(":freeminer:lamp_red", {
 	description = S("Red Lamp"),
 	drawtype = "glasslike",
 	tiles = {"default_meselamp.png"},

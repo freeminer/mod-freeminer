@@ -120,7 +120,7 @@ local function register_deep_plant(name, definition)
         end,
     }
 
-    minetest.register_node(name, node_definition)
+    minetest.register_node(":" .. name, node_definition)
 end
 
 register_deep_plant("freeminer:pressure_lantern_kelp", {
