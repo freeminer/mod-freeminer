@@ -31,6 +31,7 @@ if has_default then
 		feature("freeminer_nodes", "fm_minetest_game.lua")
 	end
 elseif has_mcl then
+	feature("freeminer_mapgen", "fm_voxelibre.lua")
 	feature("freeminer_nodes", "fm_voxelibre.lua")
 	feature("freeminer_trees", "ice_tree.lua")
 	feature("freeminer_trees", "lava_tree.lua")

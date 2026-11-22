@@ -1,3 +1,4 @@
+dofile(core.get_modpath("weather") .. "/fm_voxelibre_ecology.lua")
 -- VoxeLibre has its own node names, layered snow, and weather controller.
 if core.settings:get_bool("liquid_real") then
 	dofile(core.get_modpath("weather") .. "/erosion.lua")

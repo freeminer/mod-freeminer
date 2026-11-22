@@ -1,4 +1,8 @@
 if minetest.get_modpath("freeminer") then return end
+if minetest.get_modpath("mcl_core") and rawget(_G, "mcl_core") then
+	dofile(minetest.get_modpath("freeminer_mapgen") .. "/fm_voxelibre.lua")
+	return
+end
 local default_api = rawget(_G, "default")
 if not (default_api and default_api.register_mgv6_ores and default_api.register_biomes
 		and default_api.register_ores) then return end

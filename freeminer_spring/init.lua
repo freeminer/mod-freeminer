@@ -1,7 +1,11 @@
+-- Resolve game materials once; actions keep using the engine's pressure encoding.
+local prefix = core.get_modpath("mcl_core") and "mcl_core:" or "default:"
+local water_tile = prefix == "mcl_core:" and core.registered_nodes[prefix .. "water_source"].tiles[1] or "default_water.png"
+local lava_tile = prefix == "mcl_core:" and core.registered_nodes[prefix .. "lava_source"].tiles[1] or "default_lava.png"
 
 core.register_node("spring:water",{
     description = "Water spring",
-    tiles = {"default_water.png"},
+    tiles = {water_tile},
 })
 
 core.register_abm({
@@ -9,13 +13,13 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:water_source", param2=128})
+        core.set_node(pos,{name = prefix .. "water_source", param2=128})
     end
 })
 
 core.register_node("spring:water_compressed",{
     description = "Water spring compressed",
-    tiles = {"default_water.png"},
+    tiles = {water_tile},
 })
 
 core.register_abm({
@@ -23,13 +27,13 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:water_source", param2=128+31})
+        core.set_node(pos,{name = prefix .. "water_source", param2=128+31})
     end
 })
 
 core.register_node("spring:lava",{
     description = "Lava spring",
-    tiles = {"default_lava.png"},
+    tiles = {lava_tile},
     light_source = 6,
     groups = { wield_light = 6 },
 })
@@ -39,13 +43,13 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:lava_source", param2=128})
+        core.set_node(pos,{name = prefix .. "lava_source", param2=128})
     end
 })
 
 core.register_node("spring:lava_compressed",{
     description = "Lava spring compressed",
-    tiles = {"default_lava.png"},
+    tiles = {lava_tile},
     light_source = 7,
     groups = { wield_light = 7 },
 })
@@ -55,7 +59,7 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:lava_source", param2=128+31})
+        core.set_node(pos,{name = prefix .. "lava_source", param2=128+31})
     end
 })
 
@@ -69,7 +73,7 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:dirt", param2=128})
+        core.set_node(pos,{name = prefix .. "dirt", param2=128})
     end
 })
 
@@ -83,7 +87,7 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:dirt", param2=128+31})
+        core.set_node(pos,{name = prefix .. "dirt", param2=128+31})
     end
 })
 
@@ -97,6 +101,6 @@ core.register_abm({
     interval = 2,
     chance = 2,
     action = function(pos,node)
-        core.set_node(pos,{name = "default:sand", param2=128})
+        core.set_node(pos,{name = prefix .. "sand", param2=128})
     end
 })

@@ -40,6 +40,10 @@ update("mcl_core:lava_source", {hot = 1200, wield_light = 5, liquid_drop = 1,
 update("mcl_core:lava_flowing", {hot = 700, wield_light = 2, liquid_drop = 1,
 	weight = 2000, pressure = 24}, {freeze = "mcl_core:stone"})
 
+if minetest.get_modpath("mcl_stairs") and rawget(_G, "mcl_stairs") then
+	dofile(minetest.get_modpath("freeminer_nodes") .. "/fm_voxelibre_melt.lua")
+end
+
 for _, pair in ipairs({{"tree", "leaves"}, {"darktree", "darkleaves"},
 	{"jungletree", "jungleleaves"}, {"acaciatree", "acacialeaves"},
 	{"sprucetree", "spruceleaves"}, {"birchtree", "birchleaves"}}) do
@@ -55,6 +59,10 @@ for _, name in ipairs({"mcl_fire:fire", "mcl_fire:eternal_fire"}) do
 	update(name, {hot = 200, wield_light = 13, drop_by_liquid = 1}, {waving = 1})
 end
 
+if minetest.get_modpath("mcl_fire") and minetest.registered_nodes["mcl_fire:fire"] then
+	dofile(minetest.get_modpath("freeminer_nodes") .. "/fm_voxelibre_fire.lua")
+end
+
 -- Preserve VoxeLibre's existing plank target while applying Freeminer yields.
 for _, trunk in ipairs({"tree", "darktree", "jungletree", "acaciatree", "sprucetree", "birchtree"}) do
 	local name = "mcl_core:" .. trunk
@@ -67,3 +75,6 @@ minetest.register_craft({output = "mcl_core:sandstone 2", recipe = {
 	{"mcl_core:sand", "mcl_core:sand"}, {"mcl_core:sand", "mcl_core:sand"},
 }})
 minetest.register_craft({output = "mcl_core:sand 2", recipe = {{"mcl_core:sandstone"}}})
+
+-- Apply the remaining game-specific node properties after the shared overrides.
+dofile(minetest.get_modpath("freeminer_nodes") .. "/fm_voxelibre_nodes.lua")
